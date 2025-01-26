@@ -1,4 +1,6 @@
-import { sql } from '@vercel/postgres';
+"use server";
+
+import { sql } from "@vercel/postgres";
 import {
   CustomerField,
   CustomersTableType,
@@ -6,212 +8,173 @@ import {
   InvoicesTable,
   LatestInvoiceRaw,
   Revenue,
-} from './definitions';
-import { formatCurrency } from './utils';
+} from "./definitions";
+import { formatCurrency } from "./utils";
+import { PrismaClient } from "@prisma/client";
+import axios from "axios";
 
-export async function fetchRevenue() {
+const prisma = new PrismaClient();
+
+export async function fetchCountries() {
   try {
-    // Artificially delay a response for demo purposes.
-    // Don't do this in production :)
-
-    // console.log('Fetching revenue data...');
-    // await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    const data = await sql<Revenue>`SELECT * FROM revenue`;
-
-    // console.log('Data fetch completed after 3 seconds.');
-
-    return data.rows;
+    const countries = await prisma.country.findMany();
+    return countries
+      .filter((country) => country.name.split(" ").length < 3)
+      .map((country) => ({
+        value: country.iso_code,
+        label: country.name,
+        icon: country.iso_code.replace(/./g, (char) => {
+          return String.fromCodePoint(127397 + char.charCodeAt(0));
+        }),
+      }));
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch revenue data.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch countries.");
   }
 }
 
-export async function fetchLatestInvoices() {
+export async function fetchComparisons() {
   try {
-    const data = await sql<LatestInvoiceRaw>`
-      SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      ORDER BY invoices.date DESC
-      LIMIT 5`;
-
-    const latestInvoices = data.rows.map((invoice) => ({
-      ...invoice,
-      amount: formatCurrency(invoice.amount),
-    }));
-    return latestInvoices;
+    const comparisons = await prisma.comparison.findMany({
+      include: {
+        comparisonData: {
+          include: {
+            populationData: {
+              include: {
+                country: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    return comparisons;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch the latest invoices.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch comparisons.");
   }
 }
 
-export async function fetchCardData() {
+export async function fetchComparisonData() {
   try {
-    // You can probably combine these into a single SQL query
-    // However, we are intentionally splitting them to demonstrate
-    // how to initialize multiple queries in parallel with JS.
-    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-    const invoiceStatusPromise = sql`SELECT
-         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
-         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
-         FROM invoices`;
-
-    const data = await Promise.all([
-      invoiceCountPromise,
-      customerCountPromise,
-      invoiceStatusPromise,
-    ]);
-
-    const numberOfInvoices = Number(data[0].rows[0].count ?? '0');
-    const numberOfCustomers = Number(data[1].rows[0].count ?? '0');
-    const totalPaidInvoices = formatCurrency(data[2].rows[0].paid ?? '0');
-    const totalPendingInvoices = formatCurrency(data[2].rows[0].pending ?? '0');
-
-    return {
-      numberOfCustomers,
-      numberOfInvoices,
-      totalPaidInvoices,
-      totalPendingInvoices,
-    };
+    const comparisonData = await prisma.comparisonData.findMany({
+      include: {
+        comparison: true,
+        populationData: {
+          include: {
+            country: true,
+          },
+        },
+      },
+    });
+    return comparisonData;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch card data.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch comparison data.");
   }
 }
 
-const ITEMS_PER_PAGE = 6;
-export async function fetchFilteredInvoices(
-  query: string,
-  currentPage: number,
-) {
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
-
+export async function fetchCountryById(id: number) {
   try {
-    const invoices = await sql<InvoicesTable>`
-      SELECT
-        invoices.id,
-        invoices.amount,
-        invoices.date,
-        invoices.status,
-        customers.name,
-        customers.email,
-        customers.image_url
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      WHERE
-        customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`} OR
-        invoices.amount::text ILIKE ${`%${query}%`} OR
-        invoices.date::text ILIKE ${`%${query}%`} OR
-        invoices.status ILIKE ${`%${query}%`}
-      ORDER BY invoices.date DESC
-      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
-    `;
-
-    return invoices.rows;
+    const country = await prisma.country.findUnique({
+      where: { id },
+    });
+    return country;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoices.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch country.");
   }
 }
 
-export async function fetchInvoicesPages(query: string) {
+export async function fetchPopulationDataByCountryId(countryId: number) {
   try {
-    const count = await sql`SELECT COUNT(*)
-    FROM invoices
-    JOIN customers ON invoices.customer_id = customers.id
-    WHERE
-      customers.name ILIKE ${`%${query}%`} OR
-      customers.email ILIKE ${`%${query}%`} OR
-      invoices.amount::text ILIKE ${`%${query}%`} OR
-      invoices.date::text ILIKE ${`%${query}%`} OR
-      invoices.status ILIKE ${`%${query}%`}
-  `;
-
-    const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
-    return totalPages;
+    const populationData = await prisma.populationData.findMany({
+      where: { country_id: countryId },
+    });
+    return populationData;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch total number of invoices.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch population data.");
   }
 }
 
-export async function fetchInvoiceById(id: string) {
+export async function fetchComparisonById(id: number) {
   try {
-    const data = await sql<InvoiceForm>`
-      SELECT
-        invoices.id,
-        invoices.customer_id,
-        invoices.amount,
-        invoices.status
-      FROM invoices
-      WHERE invoices.id = ${id};
-    `;
-
-    const invoice = data.rows.map((invoice) => ({
-      ...invoice,
-      // Convert amount from cents to dollars
-      amount: invoice.amount / 100,
-    }));
-
-    return invoice[0];
+    const comparison = await prisma.comparison.findUnique({
+      where: { id },
+      include: {
+        comparisonData: {
+          include: {
+            populationData: {
+              include: {
+                country: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    return comparison;
   } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch invoice.');
+    console.error("Database Error:", error);
+    throw new Error("Failed to fetch comparison.");
   }
 }
 
-export async function fetchCustomers() {
+type PopulationData = {
+  [country: string]: {
+    [indicator: string]: {
+      date: string;
+      value: number;
+    }[];
+  };
+};
+
+export async function fetchWorldBankData(
+  countryCodes: string[],
+  years: (string | number)[],
+  indicators: string[]
+): Promise<PopulationData> {
   try {
-    const data = await sql<CustomerField>`
-      SELECT
-        id,
-        name
-      FROM customers
-      ORDER BY name ASC
-    `;
+    let data: PopulationData = {};
 
-    const customers = data.rows;
-    return customers;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch all customers.');
-  }
-}
+    // Generate all requests for the API
+    const requests = countryCodes.flatMap((countryCode) =>
+      indicators.flatMap((indicator) =>
+        years.map((year) =>
+          axios.get(
+            `http://api.worldbank.org/v2/country/${countryCode}/indicator/${indicator}?date=${year}&format=json`
+          )
+        )
+      )
+    );
 
-export async function fetchFilteredCustomers(query: string) {
-  try {
-    const data = await sql<CustomersTableType>`
-		SELECT
-		  customers.id,
-		  customers.name,
-		  customers.email,
-		  customers.image_url,
-		  COUNT(invoices.id) AS total_invoices,
-		  SUM(CASE WHEN invoices.status = 'pending' THEN invoices.amount ELSE 0 END) AS total_pending,
-		  SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END) AS total_paid
-		FROM customers
-		LEFT JOIN invoices ON customers.id = invoices.customer_id
-		WHERE
-		  customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`}
-		GROUP BY customers.id, customers.name, customers.email, customers.image_url
-		ORDER BY customers.name ASC
-	  `;
+    const responses = await Promise.all(requests);
 
-    const customers = data.rows.map((customer) => ({
-      ...customer,
-      total_pending: formatCurrency(customer.total_pending),
-      total_paid: formatCurrency(customer.total_paid),
-    }));
+    // Process responses
+    for (const response of responses) {
+      const result = response.data[1];
+      if (result && result.length > 0) {
+        const { country, date, value, indicator } = result[0];
 
-    return customers;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch customer table.');
+        if (!data[country.value]) {
+          data[country.value] = {};
+        }
+
+        if (!data[country.value][indicator.id]) {
+          data[country.value][indicator.id] = [];
+        }
+
+        data[country.value][indicator.id].push({
+          date,
+          value,
+        });
+      }
+    }
+
+    return data;
+  } catch (error) {
+    console.error("Error fetching World Bank data:", error);
+    throw new Error("Failed to fetch data from World Bank.");
   }
 }
